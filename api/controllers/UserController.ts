@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { AppError } from "@errors/AppError";
+import { AppError } from "../errors/AppError";
 import { User } from "../models/userSchema";
 import bcryptjs from "bcryptjs";
 import jwt from "jsonwebtoken";

@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
-import { AppError } from "@errors/AppError";
+import { AppError } from "../errors/AppError";
 import dotenv from "dotenv";
-import { User } from "@models/userSchema";
+import { User } from "../models/userSchema";
 
 dotenv.config();
 

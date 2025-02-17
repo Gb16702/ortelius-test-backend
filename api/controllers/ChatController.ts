@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { AppError } from "../errors/AppError";
-import { searchSpacesWithAI } from "@services/langChainAgent";
+import { searchSpacesWithAI } from "../services/langChainAgent";
 import { WeatherService } from "../services/weatherService";
 
 const URL = "https://api.openai.com/v1/chat/completions" as const;

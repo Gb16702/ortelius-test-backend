@@ -1,5 +1,5 @@
-import UserController from "@controllers/UserController";
-import { authenticateUser } from "@middleware/authMiddleware";
+import UserController from "../controllers/UserController";
+import { authenticateUser } from "../middleware/authMiddleware";
 import { RequestHandler, Router } from "express";
 
 const router = Router();

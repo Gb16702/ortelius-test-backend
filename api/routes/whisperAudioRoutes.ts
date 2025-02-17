@@ -1,7 +1,7 @@
 import { RequestHandler, Router } from "express";
-import WhisperController from "@controllers/WhisperController";
-import upload from "@config/multer";
-import { multerErrorHandler } from "@middleware/uploadErrorHandler";
+import WhisperController from "../controllers/WhisperController";
+import upload from "../config/multer";
+import { multerErrorHandler } from "../middleware/uploadErrorHandler";
 
 
 const router = Router();

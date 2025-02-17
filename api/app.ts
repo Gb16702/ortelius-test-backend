@@ -1,12 +1,12 @@
 import express from "express";
-import chatRoutes from "@routes/chatRoutes";
-import userRoutes from "@routes/userRoutes";
-import weatherRoutes from "@routes/weatherRoutes";
-import whisperAudioRoutes from "@routes/whisperAudioRoutes";
+import chatRoutes from "./routes/chatRoutes";
+import userRoutes from "./routes/userRoutes";
+import weatherRoutes from "./routes/weatherRoutes";
+import whisperAudioRoutes from "./routes/whisperAudioRoutes";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import "@utils/db";
+import "../utils/db";
 
 dotenv.config();
 

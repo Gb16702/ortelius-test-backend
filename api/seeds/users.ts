@@ -1,11 +1,8 @@
-import mongoose from "mongoose";
 import dotenv from "dotenv";
 import bcryptjs from "bcryptjs";
 import { User } from "../models/userSchema";
 
 dotenv.config();
-
-const MONGO_DB_URI = process.env.MONGO_DB_URI as string;
 
 const seedUser = async () => {
   try {
