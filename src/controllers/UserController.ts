@@ -48,7 +48,8 @@ class UserController {
         message: "User logged in successfully",
         user: {
           id: user.id,
-          username: user.username
+          username: user.username,
+          credits: user.credits
         }
       });
     } catch (error) {

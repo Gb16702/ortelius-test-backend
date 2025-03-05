@@ -22,5 +22,5 @@
     "incremental": false,
     "outDir": "./dist"
   },
-  "include": ["api/**/*"]
+  "include": ["src/**/*"]
 }

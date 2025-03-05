@@ -1,10 +1,15 @@
 import dotenv from "dotenv";
 import bcryptjs from "bcryptjs";
 import { User } from "../models/userSchema";
+import connectToDatabase from "../utils/db";
+
 
 dotenv.config();
 
 const seedUser = async () => {
+
+  await connectToDatabase();
+
   try {
     const existingUser = await User.findOne({ email: process.env?.ADMIN_EMAIL });
     if (existingUser) {
@@ -18,7 +23,6 @@ const seedUser = async () => {
       username: "Geoffrey",
       email: process.env?.ADMIN_EMAIL,
       password: hashedPassword,
-      tokens: 1000,
     });
 
     await user.save();

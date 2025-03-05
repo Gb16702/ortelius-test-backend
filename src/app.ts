@@ -6,7 +6,7 @@ import whisperAudioRoutes from "./routes/whisperAudioRoutes";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import "../utils/db";
+import connectToDatabase from "@utils/db";
 
 dotenv.config();
 
@@ -31,5 +31,13 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(err.status || 500).json({ error: err.message || "Internal Server Error" });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+(async () => {
+  try {
+    await connectToDatabase();
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (error) {
+    console.error("Failed to start server :", error);
+    process.exit(1);
+  }
+})();

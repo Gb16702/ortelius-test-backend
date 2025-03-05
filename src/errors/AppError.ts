@@ -11,6 +11,10 @@ export class AppError extends Error {
     return new AppError(message, 400);
   }
 
+  static forbidden(message: string): AppError {
+    return new AppError(message, 403);
+  }
+
   static internal(message: string): AppError {
     return new AppError(message, 500);
   }

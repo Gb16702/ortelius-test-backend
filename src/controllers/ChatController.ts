@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { AppError } from "../errors/AppError";
 import { searchSpacesWithAI } from "../services/langChainAgent";
 import { WeatherService } from "../services/weatherService";
+import { User } from "@models/userSchema";
 
 const URL = "https://api.openai.com/v1/chat/completions" as const;
 const systemPrompt = `You are a maritime and logistics expert. Your responses must be **formatted in Markdown**.
@@ -72,11 +73,32 @@ class ChatController {
 
   public async handleChat(req: Request, res: Response, next: NextFunction) {
     const { prompt, sessionId } = req.body;
-    if (!prompt || prompt.trim().length === 0) {
-      return next(AppError.badRequest("Prompt cannot be empty"));
+
+    if (!sessionId) {
+      return next(AppError.badRequest("Session ID is required"));
     }
 
     try {
+      const user = await User.findById(sessionId);
+      if (!user) {
+        return next(AppError.badRequest("User not found"));
+      }
+
+      if (!prompt || prompt.trim().length === 0) {
+        return next(AppError.badRequest("Prompt cannot be empty"));
+      }
+
+      if (prompt.length > 1000) {
+        return next(AppError.badRequest("Prompt is too long"));
+      }
+
+      if (user.credits < 5) {
+        return next(AppError.forbidden("Not enough credits"));
+      }
+
+      user.credits -= 5;
+      await user.save();
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
@@ -118,21 +140,15 @@ class ChatController {
 
       try {
         while (true) {
-          if (!reader) throw new Error("No reader available");
           const result = await reader.read();
           if (!result || result.done) break;
-
           if (!result.value) continue;
 
-          const chunk = decoder.decode(result?.value, {
-            stream: true,
-          });
-
+          const chunk = decoder.decode(result.value, { stream: true });
           chunk.split("\n").forEach(line => {
             if (line.startsWith("data:")) {
               const json = line.replace("data:", "").trim();
               if (json === "[DONE]") {
-                res.write("data: [DONE]\n\n");
                 return;
               }
 
@@ -146,12 +162,25 @@ class ChatController {
           });
         }
 
+        user.credits -= 5;
+        await user.save();
+
+        const creditsUpdateEvent = JSON.stringify({
+          type: "creditsUpdate",
+          credits: user.credits,
+        });
+        res.write(`data: ${creditsUpdateEvent}\n\n`);
+
+        res.write("data: [DONE]\n\n");
+        res.end();
+
         if (!res.writableEnded) {
           res.write("\n\n");
           res.end();
         }
       } catch (error) {
         console.error("Error in handleChat : ", error);
+
         if (!res.writableEnded) {
           res.write("data: [DONE]\n\n");
           res.end();
