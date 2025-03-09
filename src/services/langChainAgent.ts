@@ -1,241 +1,456 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { Space } from "../models/storageSchema";
-import { WeatherService } from "./weatherService";
+import { CacheContainer } from "node-ts-cache";
+import { MemoryStorage } from "node-ts-cache-storage-memory";
 import dotenv from "dotenv";
+import assert from "assert";
 
 dotenv.config();
 
-const weatherService = new WeatherService();
+const OPENAI_MODEL = "gpt-4-turbo";
+const DEFAULT_TEMPERATURE = 0.5;
+const QUERY_LIMIT = 3;
+const RESULTS_CACHE_TTL = 3600;
+const INTENT_CACHE_TTL = 1800;
+const MONGO_QUERY_CACHE_TTL = 3600;
+const DEFAULT_LANGUAGE = "en";
 
-const llm = new ChatOpenAI({
-  model: "gpt-4-turbo",
-  temperature: 0.5,
-  openAIApiKey: process.env.OPENAI_API_KEY,
-});
-
-const detectWeatherIntent = async (userPrompt: string) => {
-  console.log("🔍 Analyzing weather intent for:", userPrompt);
-
-  const response = await llm.invoke([
-    {
-      role: "system",
-      content: `
-      You are a logistics and maritime AI assistant. Analyze the user's query and categorize it based on the following classification.
-
-      **Output JSON format:**
-      {
-        "isWeatherQuery": boolean,       // True if related to maritime or port weather
-        "city": string | null,           // Extract city name if relevant
-        "queryCategory": string | null,  // One of: "warehouse", "freight_forwarding", "customs", "port_services", "cargo_management", "maritime_weather", "other"
-        "filters": string[]               // Extract relevant filters (if any) based on query
-      }
-
-      **Categories:**
-      - "warehouse": Queries related to **storage spaces, warehouses, availability**
-      - "freight_forwarding": Questions about **shipping, transport logistics, Incoterms**
-      - "customs": Related to **duties, import/export documentation, compliance**
-      - "port_services": Includes **container handling, bunkering, cranes, repairs**
-      - "cargo_management": Managing **cargo types, special handling requirements**
-      - "maritime_weather": Weather affecting **shipping, navigation, ports**
-      - "other": If the query does not fit into these categories
-
-      **Filters Extraction:**
-      Extract relevant filters from this list if present in the query:
-      - Container Handling, Liquid Handling, Cranes, Firefighting, Sustainable Practices
-      - Port Authority, Buoys, Radar Systems, High-speed Internet, Strict Environmental Policies
-      - Transparent Tariffs and Fees, Restaurants, Recreational Areas, Accommodation
-      - Road Connectivity, Rail Connectivity, Hydrogen Fueling, Emergency Response Teams
-      - Ship Repair Services, Port Management System, Lighthouses, Chandlery Services
-      - Waterway Connectivity, Container Docks, Tracking Systems, Multipurpose Docks
-      - Bulk Handling, Fueling, Bunkering, Medical Facilities, Conveyor Belts, LNG Fueling
-      - Customs Facilities, Wi-Fi Hotspots
-
-      **Example Inputs & Outputs:**
-      - "What's the weather like at Shanghai Port?"
-        → { "isWeatherQuery": true, "city": "Shanghai", "queryCategory": "maritime_weather", "filters": [] }
-
-      - "I need a 500m² warehouse in Hamburg with refrigeration"
-        → { "isWeatherQuery": false, "city": "Hamburg", "queryCategory": "warehouse", "filters": ["Refrigerated Cargo (Reefer)"] }
-
-      - "What are the customs fees for importing electronics to Rotterdam?"
-        → { "isWeatherQuery": false, "city": "Rotterdam", "queryCategory": "customs", "filters": ["Electronics and High-Tech Goods"] }
-
-      - "Where can I refuel with LNG in Singapore?"
-        → { "isWeatherQuery": false, "city": "Singapore", "queryCategory": "port_services", "filters": ["LNG Fueling"] }
-
-      Now, analyze this query:
-      `,
-    },
-    { role: "user", content: userPrompt },
-  ]);
-
-  try {
-    const parsedResponse = JSON.parse(response.content as string);
-    console.log("📋 Weather intent analysis:", parsedResponse);
-    return parsedResponse;
-  } catch (error) {
-    console.error("Error parsing weather intent:", error);
-    return { isWeatherQuery: false, city: null, isPortRelated: false };
-  }
+const RESPONSE_CODES = {
+  SUCCESS: "SUCCESS",
+  NO_STORAGE_SPACES: "NO_STORAGE_SPACES",
+  NO_MATCHING_SPACES: "NO_MATCHING_SPACES",
+  NEED_MORE_INFO: "NEED_MORE_INFO",
+  ERROR: "ERROR",
 };
 
-const generateMongoQuery = async (userPrompt: string) => {
-  const response = await llm.invoke([
+export interface AIResponse {
+  code: string;
+  message: string;
+}
+
+const resultsCache = new CacheContainer(new MemoryStorage());
+const intentCache = new CacheContainer(new MemoryStorage());
+const mongoQueryCache = new CacheContainer(new MemoryStorage());
+
+function createLLM(temperature = DEFAULT_TEMPERATURE) {
+  return new ChatOpenAI({
+    model: OPENAI_MODEL,
+    temperature,
+    openAIApiKey: process.env.OPENAI_API_KEY,
+    maxConcurrency: 5,
+    maxRetries: 3,
+  });
+}
+const llmForIntent = createLLM(0.2);
+const llmForQueries = createLLM(0.5);
+
+function hashString(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return hash.toString(16);
+}
+
+/**
+ * Classifie le message en tenant compte de l'historique complet de la conversation.
+ * conversationSoFar doit contenir l'historique complet incluant le dernier message.
+ */
+export async function classifyUserMessage(conversationSoFar: string): Promise<string> {
+  const response = await llmForIntent.invoke([
     {
       role: "system",
       content: `
-        You are an AI assistant specialized in **logistics and storage management**.
-        Your task is to **convert natural language queries into MongoDB queries**.
+You are a text classifier.
+You see the entire conversation so far, including the last user message.
+You MUST respond with exactly one label from this list:
+- GREETING
+- FAREWELL
+- LOGISTICS
+- OFF_TOPIC
 
-        🔹 **IMPORTANT**: Return only a **valid JSON object**, with **no explanations**.
-        🔹 **If the query is too vague**, add the field **"_needMoreInfo": true**.
+Do not add anything else.
 
-        ## **Examples**:
-        - **User**: "I need a 200m² warehouse in Lyon with CCTV."
-          → \`{ "space_type": "warehouse", "space_in_square_m": { "$gte": 200 }, "location.address": { "$regex": "Lyon", "$options": "i" }, "services": { "$all": ["CCTV"] } }\`
-
-        Now, generate a MongoDB query for the following user request:
+Conversation so far:
+${conversationSoFar}
       `,
     },
-    { role: "user", content: userPrompt },
   ]);
 
+  let rawContent: string;
+  if (Array.isArray(response.content)) {
+    rawContent = response.content.join(" ");
+  } else {
+    rawContent = String(response.content || "");
+  }
+  assert(typeof rawContent === "string", "Expected response.content to be a string");
+
+  const label = rawContent.trim().toUpperCase();
+  console.log("Classified user message as:", label);
+  if (!["GREETING", "FAREWELL", "LOGISTICS", "OFF_TOPIC"].includes(label)) {
+    return "OFF_TOPIC";
+  }
+  return label;
+}
+
+/**
+ * Traduit le message dans la langue souhaitée.
+ * Exportée pour être utilisée dans d'autres modules.
+ */
+export async function translateMessage(message: string, languageCode: string): Promise<string> {
+  if (languageCode === "en") {
+    return message;
+  }
+  const response = await llmForQueries.invoke([
+    {
+      role: "system",
+      content: `
+You are a translator. You must respond exclusively in ${languageCode},
+with no explanation. Translate the text below to ${languageCode}, respecting any Markdown:
+
+${message}
+      `,
+    },
+  ]);
+  return response.content as string;
+}
+
+async function findRelevantStorageSpaces(location: string) {
+  if (!location || location.trim().length === 0) {
+    return [];
+  }
+  const normalizedLocation = location.trim().toLowerCase();
+  const cacheKey = `storageSpaces_${normalizedLocation}`;
+
+  const cachedResults = await resultsCache.getItem<any[]>(cacheKey);
+  if (cachedResults) {
+    return cachedResults;
+  }
   try {
-    let query = JSON.parse(response.content as string);
-
-    if (query.space_type && typeof query.space_type === "string") {
-      query.space_type = { "$regex": "warehouse", "$options": "i" };
-    }
-
-    console.log("MongoDB Request generated:", query);
-    return query;
+    const query = { "location.address": { $regex: normalizedLocation, $options: "i" } };
+    const spaces = await Space.find(query).limit(QUERY_LIMIT).lean();
+    console.log(`Found ${spaces.length} spaces matching '${normalizedLocation}' in location.address`);
+    await resultsCache.setItem(cacheKey, spaces, { ttl: RESULTS_CACHE_TTL });
+    return spaces;
   } catch (error) {
-    console.error("Error parsing JSON:", error);
+    console.error("Error finding storage spaces:", error);
+    return [];
+  }
+}
+
+async function translateNoSpacesFound(location: string, languageCode: string): Promise<string> {
+  if (languageCode === "en") {
+    return `**No storage spaces found in ${location}.**`;
+  }
+  const response = await llmForQueries.invoke([
+    {
+      role: "system",
+      content: `
+Tu es un traducteur. Tu dois répondre **exclusivement** en ${languageCode}
+sans aucune autre explication.
+
+Traduis la phrase suivante en ${languageCode},
+en respectant la mise en forme Markdown :
+
+No storage spaces found in ${location}.
+      `,
+    },
+  ]);
+  return response.content as string;
+}
+
+async function generateNeedMoreInfoMessage(languageCode: string): Promise<string> {
+  const response = await llmForQueries.invoke([
+    {
+      role: "system",
+      content: `
+Tu es un agent de conversation logistique.
+Tu dois répondre uniquement en ${languageCode}.
+Reste concis et demande les informations manquantes (taille, localisation, services, etc.).
+Formate ta réponse en Markdown.
+N'écris aucune autre explication en dehors de la réponse finale.
+      `,
+    },
+    {
+      role: "user",
+      content: `L'utilisateur a fait une requête trop vague,
+on manque notamment la taille, l'emplacement,
+et/ou d'autres caractéristiques pour trouver un espace de stockage.`,
+    },
+  ]);
+  return response.content as string;
+}
+
+async function extractLocations(userPrompt: string) {
+  const cacheKey = `locations_${hashString(userPrompt)}`;
+  const cachedLocations = await intentCache.getItem<any>(cacheKey);
+  if (cachedLocations) {
+    return cachedLocations;
+  }
+  try {
+    const locationExtraction = await llmForIntent.invoke([
+      {
+        role: "system",
+        content: `
+Extract origin and destination locations from the shipping query.
+Return ONLY a JSON object with this structure:
+{
+  "origin": string | null,
+  "destination": string | null
+}
+
+Example:
+Query: "I need to ship auto parts from Shanghai to Hamburg"
+Response: {"origin": "Shanghai", "destination": "Hamburg"}
+
+If a location isn't specified, return null for that field.
+        `,
+      },
+      { role: "user", content: userPrompt },
+    ]);
+    let locations = { origin: null, destination: null };
+    try {
+      locations = JSON.parse(locationExtraction.content as string);
+      await intentCache.setItem(cacheKey, locations, { ttl: INTENT_CACHE_TTL });
+      return locations;
+    } catch (error) {
+      return locations;
+    }
+  } catch (error) {
+    return { origin: null, destination: null };
+  }
+}
+
+async function detectLogisticsIntent(userPrompt: string) {
+  const cacheKey = `logisticsIntent_${hashString(userPrompt)}`;
+  const cachedIntent = await intentCache.getItem<any>(cacheKey);
+  if (cachedIntent) {
+    return cachedIntent;
+  }
+  const isLogisticsQuery =
+    /\b(ship|shipping|freight|cargo|transport|logistics|incoterm|export|import|customs|duties|fob|cif|exw|dap|ddp|cfr|fas|delivery terms)\b/i.test(
+      userPrompt
+    );
+  const result = { isLogisticsQuery, needsFullAnalysis: isLogisticsQuery };
+  await intentCache.setItem(cacheKey, result, { ttl: INTENT_CACHE_TTL });
+  return result;
+}
+
+async function generateMongoQuery(userPrompt: string) {
+  const cacheKey = `mongoQuery_${hashString(userPrompt)}`;
+  const cachedQuery = await mongoQueryCache.getItem<any>(cacheKey);
+  if (cachedQuery) {
+    return cachedQuery;
+  }
+  try {
+    const response = await llmForQueries.invoke([
+      {
+        role: "system",
+        content: `
+You are an AI assistant specialized in logistics and storage management.
+Your task is to convert natural language queries into MongoDB queries.
+
+Return only a valid JSON object, with no explanations.
+If the query is too vague, add the field "_needMoreInfo": true.
+        `,
+      },
+      { role: "user", content: userPrompt },
+    ]);
+    try {
+      let query = JSON.parse(response.content as string);
+      if (query && query.space_type && typeof query.space_type === "string") {
+        query.space_type = { $regex: query.space_type, $options: "i" };
+      }
+      await mongoQueryCache.setItem(cacheKey, query, { ttl: MONGO_QUERY_CACHE_TTL });
+      return query;
+    } catch (error) {
+      return null;
+    }
+  } catch (error) {
     return null;
   }
-};
+}
 
-
-const detectIncotermQuery = async (userPrompt: string) => {
-  console.log("🔍 Checking for Incoterm context:", userPrompt);
-
-  const response = await llm.invoke([
-    {
-      role: "system",
-      content: `
-      Analyze whether the query is related to Incoterms.
-      **Return ONLY a valid JSON** with this structure:
-      {
-        "isIncotermQuery": boolean,
-        "needsMoreInfo": boolean,
-        "suggestedIncoterm": string | null
-      }
-
-      Example analysis:
-      - "What Incoterm should I use for shipping auto parts from China to Germany?"
-        → { "isIncotermQuery": true, "needsMoreInfo": false, "suggestedIncoterm": "FOB" }
-      - "I need help with Incoterms."
-        → { "isIncotermQuery": true, "needsMoreInfo": true, "suggestedIncoterm": null }
-
-      Analyze this request:
-      `,
-    },
-    { role: "user", content: userPrompt },
-  ]);
-
-  try {
-    const parsedResponse = JSON.parse(response.content as string);
-    console.log("Incoterm analysis:", parsedResponse);
-    return parsedResponse;
-  } catch (error) {
-    console.error("Error parsing Incoterm response:", error);
-    return { isIncotermQuery: false, needsMoreInfo: false, suggestedIncoterm: null };
+async function analyzeMaritimeQuery(userPrompt: string, languageCode: string): Promise<AIResponse> {
+  const locations = await extractLocations(userPrompt);
+  let foundSpaces = false;
+  let destinationSpaces: any[] = [];
+  if (locations.destination) {
+    destinationSpaces = await findRelevantStorageSpaces(locations.destination);
+    if (destinationSpaces.length > 0) {
+      foundSpaces = true;
+    }
   }
-};
+  if (!foundSpaces && locations.destination) {
+    const shippingPrompt = `
+You are a specialized maritime logistics expert.
 
-const formatWeatherResponse = async (userPrompt: string, weatherData: any) => {
-  const response = await llm.invoke([
+CRITICAL INSTRUCTION: You MUST respond ONLY in ${languageCode} language.
+DO NOT apologize for language limitations.
+DO NOT say you can only respond in English.
+
+When answering shipping queries:
+1. Focus ONLY on maritime/sea freight options
+2. Provide brief information about container options, transit times, and routes
+3. Recommend appropriate maritime Incoterms (FOB, CFR, CIF, FAS)
+4. Keep your response concise and professional
+
+DO NOT mention storage spaces or availability.
+
+Query: ${userPrompt}
+    `;
+    const shippingInfo = await llmForQueries.invoke([
+      { role: "system", content: shippingPrompt },
+      { role: "user", content: userPrompt },
+    ]);
+    const noSpacesTranslated = await translateNoSpacesFound(locations.destination, languageCode);
+    return {
+      code: RESPONSE_CODES.NO_STORAGE_SPACES,
+      message: noSpacesTranslated + "\n\n" + (shippingInfo.content as string),
+    };
+  }
+  let storageInfo = "";
+  if (foundSpaces && destinationSpaces.length > 0) {
+    storageInfo = "## Available Storage Facilities\n\n";
+    destinationSpaces.forEach((space: any) => {
+      storageInfo += `- **${space.name}** (${space.space_in_square_m}m²) - ${space.location?.address || ""}\n`;
+      if (space.services && space.services.length > 0) {
+        storageInfo += `  - Services: ${space.services.join(", ")}\n`;
+      }
+      if (space.categories && space.categories.length > 0) {
+        storageInfo += `  - Suitable for: ${space.categories.join(", ")}\n`;
+      }
+    });
+  }
+  const maritimeResponse = await llmForQueries.invoke([
     {
       role: "system",
       content: `
-        You are a **maritime logistics expert** assessing weather conditions **for port operations**.
-        Your task is to determine **if the weather is favorable or not** for maritime activities.
+You are a specialized maritime logistics expert. Your responses should be concise, practical, and focused on maritime shipping.
+IMPORTANT: You MUST respond in ${languageCode} language only.
 
-        🔹 **Rules for classification**:
-        - If **wind speed < 20 km/h** and **no storms**, weather is **favorable**.
-        - If **wind speed between 20-40 km/h** or **light rain**, weather is **moderate**.
-        - If **wind speed > 40 km/h** or **storms**, weather is **unfavorable**.
+When answering shipping queries:
+1. Focus ONLY on maritime/sea freight options
+2. Provide brief, practical information about maritime routes
+3. Recommend appropriate maritime Incoterms
+4. Keep responses concise and business-oriented
 
-        🔹 **Response format**:
-        Return a single-line response indicating if the **weather is favorable, moderate, or unfavorable**.
-        Example:
-        - **Favorable**: "The weather is favorable for shipping operations."
-        - **Moderate**: "Weather conditions are moderate. Proceed with caution."
-        - **Unfavorable**: "The weather is unfavorable. High risks for maritime operations."
-
-        Use only the provided weather data and do not invent information.
+Format your response in professional Markdown with:
+- Clear, brief sections
+- Bullet points for container options and Incoterms
+- Bold text for key maritime terms
       `,
     },
     {
       role: "user",
       content: `
-        Original question: "${userPrompt}"
-
-        Current weather data:
-        - Location: ${weatherData.location}
-        - Wind speed: ${weatherData.windSpeed} km/h
-        - Weather conditions: ${weatherData.description}
-
-        Evaluate the weather based on the given rules and respond accordingly.
+Query: ${userPrompt}
+${storageInfo ? "Storage information at destination:" + storageInfo : ""}
       `,
     },
   ]);
+  return {
+    code: RESPONSE_CODES.SUCCESS,
+    message: maritimeResponse.content as string,
+  };
+}
 
-  return response.content as string;
-};
-
-const searchSpacesWithAI = async (userPrompt: string) => {
-  const incotermIntent = await detectIncotermQuery(userPrompt);
-  if (incotermIntent.isIncotermQuery) {
-    if (incotermIntent.needsMoreInfo) {
-      return "**Which aspect of Incoterms do you need help with?** (Cost breakdown, responsibility, customs?)";
+/**
+ * La fonction searchSpacesWithAI reçoit deux arguments :
+ * - conversationSoFar : l'historique complet de la conversation (pour la classification)
+ * - userPrompt : le dernier message de l'utilisateur (pour l'analyse spécifique)
+ */
+export async function searchSpacesWithAI(
+  conversationSoFar: string,
+  userPrompt: string,
+  languageCode: string = DEFAULT_LANGUAGE
+): Promise<AIResponse> {
+  try {
+    const label = await classifyUserMessage(conversationSoFar);
+    switch (label) {
+      case "GREETING": {
+        const greetingMsg = await translateMessage("Bonjour, comment puis-je vous aider dans le domaine maritime ?", languageCode);
+        return { code: RESPONSE_CODES.SUCCESS, message: greetingMsg };
+      }
+      case "FAREWELL": {
+        const farewellMsg = await translateMessage("Au revoir !", languageCode);
+        return { code: RESPONSE_CODES.SUCCESS, message: farewellMsg };
+      }
+      case "OFF_TOPIC": {
+        const offTopicMsg = await translateMessage("Je suis spécialisé dans la logistique maritime. Comment puis-je vous aider ?", languageCode);
+        return { code: RESPONSE_CODES.SUCCESS, message: offTopicMsg };
+      }
+      case "LOGISTICS":
+        break;
+      default: {
+        const fallbackMsg = await translateMessage("Pouvez-vous préciser votre demande en lien avec la logistique maritime ?", languageCode);
+        return { code: RESPONSE_CODES.SUCCESS, message: fallbackMsg };
+      }
     }
-    return `**Based on your request, the best Incoterm is:** **${incotermIntent.suggestedIncoterm}**.
-    Would you like details on why this is the best choice?`;
-  }
-
-  const weatherIntent = await detectWeatherIntent(userPrompt);
-  if (weatherIntent.isWeatherQuery && weatherIntent.city) {
-    console.log("✅ Weather query detected for city:", weatherIntent.city);
+    const logisticsIntent = await detectLogisticsIntent(userPrompt);
+    if (logisticsIntent.isLogisticsQuery) {
+      const maritimeResp = await analyzeMaritimeQuery(userPrompt, languageCode);
+      return maritimeResp;
+    }
+    let potentialLocation: string | null = null;
     try {
-      const weatherData = await weatherService.getPortWeather(weatherIntent.city);
-      const formattedResponse = await formatWeatherResponse(userPrompt, weatherData);
-      return formattedResponse;
+      const locations = await extractLocations(userPrompt);
+      potentialLocation = locations.destination || locations.origin;
+      if (potentialLocation) {
+        const directSpaces = await findRelevantStorageSpaces(potentialLocation);
+        if (directSpaces.length > 0) {
+          let responseText = "**Here are available storage spaces:**\n\n";
+          for (const space of directSpaces) {
+            responseText += `- **${space.name}**, **${space.space_in_square_m}m²**, located at **${space.location?.address || ""}**\n`;
+            if (space.services?.length) {
+              responseText += `  - Services: ${space.services.join(", ")}\n`;
+            }
+            if (space.categories?.length) {
+              responseText += `  - Suitable for: ${space.categories.join(", ")}\n`;
+            }
+          }
+          return { code: RESPONSE_CODES.SUCCESS, message: responseText };
+        } else {
+          const noSpacesMsg = await translateNoSpacesFound(potentialLocation, languageCode);
+          return { code: RESPONSE_CODES.NO_STORAGE_SPACES, message: noSpacesMsg };
+        }
+      }
     } catch (error) {
-      return "Unable to fetch weather details at the moment.";
+      console.error("Error extracting location directly:", error);
+      potentialLocation = null;
     }
+    const query = await generateMongoQuery(userPrompt);
+    if (!query) {
+      const notUnderstoodMsg = await translateMessage("I didn't understand your request. Could you provide more details?", languageCode);
+      return { code: RESPONSE_CODES.ERROR, message: notUnderstoodMsg };
+    }
+    if (query._needMoreInfo) {
+      const needMoreInfo = await generateNeedMoreInfoMessage(languageCode);
+      return { code: RESPONSE_CODES.NEED_MORE_INFO, message: needMoreInfo };
+    }
+    const results = await Space.find(query).limit(5).lean();
+    if (results.length === 0) {
+      const noSpacesMsg = await translateNoSpacesFound("the specified location or criteria", languageCode);
+      return { code: RESPONSE_CODES.NO_MATCHING_SPACES, message: noSpacesMsg };
+    }
+    let responseText = "**Here are available storage spaces:**\n\n";
+    for (const space of results) {
+      responseText += `- **${space.name}**, **${space.space_in_square_m}m²**, located at **${space.location?.address || ""}**\n`;
+      if (space.services?.length) {
+        responseText += `  - Services: ${space.services.join(", ")}\n`;
+      }
+      if (space.categories?.length) {
+        responseText += `  - Suitable for: ${space.categories.join(", ")}\n`;
+      }
+    }
+    return { code: RESPONSE_CODES.SUCCESS, message: responseText };
+  } catch (error) {
+    console.error("Error in searchSpacesWithAI:", error);
+    const errorMsg = await translateMessage("An error occurred while processing your request. Please try again later.", languageCode);
+    return { code: RESPONSE_CODES.ERROR, message: errorMsg };
   }
+}
 
-  const query = await generateMongoQuery(userPrompt);
-  if (!query) return "I didn't understand your request.";
-
-  if (query._needMoreInfo) {
-    return "**I need more details.** What size, location, or features are required?";
-  }
-
-  const results = await Space.find(query).limit(5);
-  console.log(results);
-  console.log(results.length);
-  if (results.length === 0) {
-    return "No matching storage spaces found.";
-  }
-
-  let responseText = "**Here are available storage spaces:**\n\n";
-  results.forEach((space: any) => {
-    responseText += `- **${space.name}**, **${space.space_in_square_m}m²**, located at **${space.location?.address}**\n`;
-  });
-
-  return responseText;
-};
-
-export { searchSpacesWithAI };
+export { RESPONSE_CODES };
