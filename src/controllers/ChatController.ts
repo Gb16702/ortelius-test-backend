@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import { AppError } from "../errors/AppError";
 import { searchSpacesWithAI, AIResponse, RESPONSE_CODES, translateMessage } from "../services/langChainAgent";
-import { WeatherService } from "../services/weatherService";
 import { User } from "@models/userSchema";
 import { OpenAI } from "openai";
 import { ConversationBufferMemoryService } from "../services/conversationBufferMemory";
+import { UserRepository } from "repository/UserRepository";
 
 const sessionStates = new Map<string, { lastResponseCode?: string }>();
 
@@ -141,12 +141,12 @@ const BASE_SYSTEM_PROMPT = `You are a maritime and logistics expert. Your respon
 `;
 
 class ChatController {
-  private weatherService: WeatherService;
   private conversationMemory: ConversationBufferMemoryService;
+  private userRepository: UserRepository;
 
   constructor() {
-    this.weatherService = new WeatherService();
     this.conversationMemory = new ConversationBufferMemoryService();
+    this.userRepository = new UserRepository();
   }
 
   public async handleChat(req: Request, res: Response, next: NextFunction) {
@@ -160,11 +160,11 @@ class ChatController {
     res.setHeader("Connection", "keep-alive");
 
     try {
-      const user = await User.findById(sessionId);
-      if (!user) return next(AppError.badRequest("User not found"));
+      const user = await this.userRepository.findById(sessionId);
+      console.log(user);
+
       if (user.credits < CREDITS_PER_REQUEST) return next(AppError.forbidden("Not enough credits"));
-      user.credits -= CREDITS_PER_REQUEST;
-      await user.save();
+      await this.userRepository.deductCredits(sessionId, CREDITS_PER_REQUEST);
 
       if (!sessionStates.has(sessionId)) {
         sessionStates.set(sessionId, {});

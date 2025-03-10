@@ -3,7 +3,6 @@ import bcryptjs from "bcryptjs";
 import { User } from "../models/userSchema";
 import connectToDatabase from "../utils/db";
 
-
 dotenv.config();
 
 const seedUser = async () => {

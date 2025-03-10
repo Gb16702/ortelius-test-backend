@@ -1,4 +1,4 @@
-import multer, { Multer } from "multer";
+import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { Request } from "express";
@@ -28,11 +28,6 @@ const storage = multer.diskStorage({
 
 const fileFilter = (req: Request, file: Express.Multer.File, cb: any) => {
   const extension = path.extname(file.originalname).toLowerCase();
-  console.log(file.mimetype);
-  console.log(extension);
-  console.log(file.originalname);
-  console.log(allowedExtensions.includes(extension));
-
 
   if (!allowedExtensions.includes(extension) || !allowedMimeTypes.includes(file.mimetype)) {
     return cb(null, false);

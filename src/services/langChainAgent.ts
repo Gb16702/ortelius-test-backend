@@ -95,10 +95,6 @@ ${conversationSoFar}
   return label;
 }
 
-/**
- * Traduit le message dans la langue souhaitée.
- * Exportée pour être utilisée dans d'autres modules.
- */
 export async function translateMessage(message: string, languageCode: string): Promise<string> {
   if (languageCode === "en") {
     return message;
@@ -357,11 +353,6 @@ ${storageInfo ? "Storage information at destination:" + storageInfo : ""}
   };
 }
 
-/**
- * La fonction searchSpacesWithAI reçoit deux arguments :
- * - conversationSoFar : l'historique complet de la conversation (pour la classification)
- * - userPrompt : le dernier message de l'utilisateur (pour l'analyse spécifique)
- */
 export async function searchSpacesWithAI(
   conversationSoFar: string,
   userPrompt: string,

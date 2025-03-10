@@ -49,8 +49,8 @@ class UserController {
         user: {
           id: user.id,
           username: user.username,
-          credits: user.credits
-        }
+          credits: user.credits,
+        },
       });
     } catch (error) {
       next(error);
@@ -65,16 +65,6 @@ class UserController {
     });
 
     res.json({ message: "User logged out successfully" });
-  }
-
-  async me(req: Request, res: Response, next: NextFunction) {
-    try {
-      res.json({
-        user: (req as any).user,
-      });
-    } catch (error) {
-      next(error);
-    }
   }
 }
 
